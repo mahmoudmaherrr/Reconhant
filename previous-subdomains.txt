@@ -1,0 +1,12 @@
+mta.projectbaseline.com
+cloud.projectbaseline.com
+click.projectbaseline.com
+enrollment-dev.projectbaseline.com
+smetrics.projectbaseline.com
+auth-nonprod.projectbaseline.com
+auth.projectbaseline.com
+www.projectbaseline.com
+view.projectbaseline.com
+dashboard.projectbaseline.com
+image.projectbaseline.com
+vercel-stage.projectbaseline.com
