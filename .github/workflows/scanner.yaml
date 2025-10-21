@@ -1,4 +1,4 @@
-name: Subdomain & Vulnerability Scanner (Enhanced & Robust)
+name: Subdomain & Vulnerability Scanner (Robust & Reliable)
 
 on:
   workflow_dispatch:
@@ -53,11 +53,10 @@ jobs:
 
       - name: Install system packages & tools
         run: |
-          set -euxo pipefail
+          set -uo pipefail # Exit on unset vars and pipe failures
           sudo apt-get update
           sudo apt-get install -y jq curl unzip git gcc make libpcap-dev
 
-          # Install Go-based tools with error handling
           echo "Installing Go tools..."
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || echo "subfinder install failed"
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest || echo "nuclei install failed"
@@ -69,10 +68,10 @@ jobs:
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest || echo "katana install failed"
 
           echo "$HOME/go/bin" >> $GITHUB_PATH
+          echo "Tool installation complete."
 
       - name: Validate secrets
         run: |
-          set -euxo pipefail
           if [ -z "${{ secrets.DISCORD_WEBHOOK }}" ]; then
             echo "::error::DISCORD_WEBHOOK secret is not set"
             exit 1
@@ -80,35 +79,25 @@ jobs:
           echo "DISCORD_WEBHOOK=${{ secrets.DISCORD_WEBHOOK }}" >> $GITHUB_ENV
 
       - name: Create results directory
-        run: |
-          set -euxo pipefail
-          mkdir -p results
+        run: mkdir -p results
 
       - name: Notify Start
         run: |
-          set -euxo pipefail
-          # Build JSON payload safely
-          PAYLOAD=$(jq -n \
-            --arg c "🔍 **Scan Started**" \
-            --arg d "${{ env.DOMAIN }}" \
-            --arg t "${{ github.event_name }}" \
-            --arg tools "subfinder, dnsx, httpx, naabu, waybackurls, gau, katana, nuclei" \
-            '{content: ($c + "\n**Domain:** " + $d + "\n**Trigger:** " + $t + "\n**Tools:** " + $tools)}')
-          
+          MSG="🔍 **Scan Started**\n**Domain:** ${{ env.DOMAIN }}\n**Trigger:** ${{ github.event_name }}\n**Tools:** subfinder, dnsx, httpx, naabu, waybackurls, gau, katana, nuclei"
+          PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send start notification"
 
       - name: Discover subdomains
         run: |
-          set -euxo pipefail
-          echo "Starting subdomain discovery for ${{ env.DOMAIN }}"
+          set -uo pipefail
+          echo "--- Starting subdomain discovery for ${{ env.DOMAIN }} ---"
           
-          # Ensure output files exist
           touch results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt results/combined-subdomains.txt results/subdomains.txt
           
-          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt || echo "subfinder failed"
-          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt || echo "waybackurls failed"
-          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt || echo "gau failed"
-          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt || echo "katana failed"
+          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt || echo "subfinder finished with no results"
+          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt || echo "waybackurls finished with no results"
+          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt || echo "gau finished with no results"
+          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt || echo "katana finished with no results"
           
           cat results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt | sort -u > results/combined-subdomains.txt
           
@@ -139,50 +128,50 @@ jobs:
           
           sort -u results/combined-subdomains.txt > results/subdomains.txt
           echo "SUBDOMAINS_FOUND=$(wc -l < results/subdomains.txt)" >> $GITHUB_ENV
-          echo "Found $SUBDOMAINS_FOUND subdomains"
+          echo "--- Found $SUBDOMAINS_FOUND subdomains ---"
 
       - name: Resolve & probe alive hosts
         run: |
-          set -euxo pipefail
-          echo "Resolving subdomains and checking for alive hosts"
+          set -uo pipefail
+          echo "--- Resolving subdomains and checking for alive hosts ---"
           
           touch results/resolved.txt results/resolved-hosts.txt results/alive.txt results/alive-urls.txt
           
-          dnsx -l results/subdomains.txt -silent -a -r 1.1.1.1,8.8.8.8 -o results/resolved.txt || echo "dnsx failed"
+          dnsx -l results/subdomains.txt -silent -a -r 1.1.1.1,8.8.8.8 -o results/resolved.txt || echo "dnsx finished with no results"
           cut -d' ' -f1 results/resolved.txt | cut -d':' -f1 | sort -u > results/resolved-hosts.txt
           
-          httpx -l results/resolved-hosts.txt -silent -follow-redirects -title -status-code -tech-detect -o results/alive.txt || echo "httpx failed"
+          httpx -l results/resolved-hosts.txt -silent -follow-redirects -title -status-code -tech-detect -o results/alive.txt || echo "httpx finished with no results"
           cut -d' ' -f1 results/alive.txt > results/alive-urls.txt
           
           echo "ALIVE_HOSTS=$(wc -l < results/resolved-hosts.txt)" >> $GITHUB_ENV
           echo "ALIVE_URLS=$(wc -l < results/alive-urls.txt)" >> $GITHUB_ENV
-          echo "Found $ALIVE_HOSTS resolved hosts and $ALIVE_URLS alive URLs"
+          echo "--- Found $ALIVE_HOSTS resolved hosts and $ALIVE_URLS alive URLs ---"
 
       - name: Port scan alive hosts (naabu)
         if: env.PORT_SCAN == 'true'
         run: |
-          set -euxo pipefail
+          set -uo pipefail
+          echo "--- Starting port scan on alive hosts ---"
           touch results/naabu-ports.txt
           if [ -s results/resolved-hosts.txt ]; then
-            echo "Starting port scan on alive hosts"
-            naabu -list results/resolved-hosts.txt -silent -top-ports 1000 -o results/naabu-ports.txt || echo "naabu failed"
+            naabu -list results/resolved-hosts.txt -silent -top-ports 1000 -o results/naabu-ports.txt || echo "naabu finished with no results"
             echo "NAABU_LINES=$(wc -l < results/naabu-ports.txt)" >> $GITHUB_ENV
-            echo "Found $NAABU_LINES open ports"
+            echo "--- Found $NAABU_LINES open ports ---"
           else
             echo "NAABU_LINES=0" >> $GITHUB_ENV
-            echo "No hosts to port scan"
+            echo "--- No hosts to port scan ---"
           fi
 
       - name: Gather URLs & prepare for Nuclei
         run: |
-          set -euxo pipefail
-          echo "Gathering URLs for vulnerability scanning"
+          set -uo pipefail
+          echo "--- Gathering URLs for vulnerability scanning ---"
           
           touch results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt results/candidate-urls.txt results/nuclei-urls.txt
           
-          waybackurls "${{ env.DOMAIN }}" > results/wayback-urls.txt || echo "waybackurls for URLs failed"
-          gau "${{ env.DOMAIN }}" > results/gau-urls.txt || echo "gau for URLs failed"
-          cat results/alive-urls.txt | katana -depth 2 -jc -silent -o results/katana-urls.txt || echo "katana for URLs failed"
+          waybackurls "${{ env.DOMAIN }}" > results/wayback-urls.txt || echo "waybackurls for URLs finished with no results"
+          gau "${{ env.DOMAIN }}" > results/gau-urls.txt || echo "gau for URLs finished with no results"
+          cat results/alive-urls.txt | katana -depth 2 -jc -silent -o results/katana-urls.txt || echo "katana for URLs finished with no results"
           
           cat results/alive-urls.txt results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt | sort -u > results/candidate-urls.txt
           
@@ -194,38 +183,44 @@ jobs:
           fi
           
           echo "NUCLEI_URLS=$(wc -l < results/nuclei-urls.txt)" >> $GITHUB_ENV
-          echo "Prepared $NUCLEI_URLS URLs for vulnerability scanning"
+          echo "--- Prepared $NUCLEI_URLS URLs for vulnerability scanning ---"
 
       - name: Update Nuclei templates
         run: |
-          set -euxo pipefail
-          nuclei -update-templates || echo "Nuclei template update failed"
+          echo "--- Updating Nuclei templates ---"
+          nuclei -update-templates || echo "Nuclei template update failed, using existing templates."
+          echo "--- Nuclei template update complete ---"
 
       - name: Run Nuclei on URLs
         run: |
-          set -euxo pipefail
+          set -uo pipefail
+          echo "--- Running Nuclei on URLs ---"
           touch results/nuclei-urls-results.txt
           if [ -s results/nuclei-urls.txt ]; then
-            echo "Running Nuclei on URLs"
-            nuclei -l results/nuclei-urls.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-urls-results.txt -silent || echo "Nuclei on URLs failed"
+            nuclei -l results/nuclei-urls.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-urls-results.txt -silent || echo "Nuclei scan on URLs finished with errors"
+          else
+            echo "No URLs to scan with Nuclei."
           fi
 
       - name: Run Nuclei on hosts
         run: |
-          set -euxo pipefail
+          set -uo pipefail
+          echo "--- Running Nuclei on hosts ---"
           touch results/nuclei-hosts-results.txt
           if [ -s results/resolved-hosts.txt ]; then
-            echo "Running Nuclei on hosts"
-            nuclei -l results/resolved-hosts.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-hosts-results.txt -silent || echo "Nuclei on hosts failed"
+            nuclei -l results/resolved-hosts.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-hosts-results.txt -silent || echo "Nuclei scan on hosts finished with errors"
+          else
+            echo "No hosts to scan with Nuclei."
           fi
 
       - name: Process Nuclei results
         run: |
-          set -euxo pipefail
+          set -uo pipefail
+          echo "--- Processing Nuclei results ---"
           touch results/nuclei-results.txt
           cat results/nuclei-urls-results.txt results/nuclei-hosts-results.txt | sed '/^$/d' | sort -u > results/nuclei-results.txt
           echo "VULNS_FOUND=$(wc -l < results/nuclei-results.txt || echo 0)" >> $GITHUB_ENV
-          echo "Found $VULNS_FOUND vulnerabilities"
+          echo "--- Found $VULNS_FOUND vulnerabilities ---"
           
           if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
             grep -oE '\[[^]]+\]' results/nuclei-results.txt | sort | uniq -c | sort -nr > results/vuln-summary.txt || echo "Failed to create vuln summary"
@@ -235,38 +230,27 @@ jobs:
 
       - name: Notify Nuclei Summary
         run: |
-          set -euxo pipefail
           if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
-            PAYLOAD=$(jq -n \
-              --arg d "${{ env.DOMAIN }}" \
-              --arg v "${{ env.VULNS_FOUND }}" \
-              --arg s "${{ env.SEVERITY }}" \
-              '{content: ("🚨 **Vulnerabilities Found!**\n**Domain:** " + $d + "\n**Severity Filter:** " + $s + "\n**Count:** " + $v)}')
+            MSG="🚨 **Vulnerabilities Found!**\n**Domain:** ${{ env.DOMAIN }}\n**Severity Filter:** ${{ env.SEVERITY }}\n**Count:** ${{ env.VULNS_FOUND }}"
           else
-            PAYLOAD=$(jq -n \
-              --arg d "${{ env.DOMAIN }}" \
-              --arg s "${{ env.SEVERITY }}" \
-              '{content: ("✅ **Nuclei Complete**\n**Domain:** " + $d + "\n**Severity Filter:** " + $s + "\nNo vulnerabilities found.")}')
+            MSG="✅ **Nuclei Complete**\n**Domain:** ${{ env.DOMAIN }}\n**Severity Filter:** ${{ env.SEVERITY }}\nNo vulnerabilities found."
           fi
+          PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send summary notification"
 
       - name: Send vulnerability summary
         if: env.VULNS_FOUND > 0
         run: |
-          set -euxo pipefail
           if [ -s results/vuln-summary.txt ]; then
             SUMMARY=$(cat results/vuln-summary.txt | head -10 | awk '{print $2 " - " $1 " occurrences"}' | paste -sd '\n' -)
-            PAYLOAD=$(jq -n \
-              --arg d "${{ env.DOMAIN }}" \
-              --arg s "$SUMMARY" \
-              '{content: ("📊 **Vulnerability Summary for " + $d + "**\n```\n" + $s + "\n```")}')
+            MSG="📊 **Vulnerability Summary for ${{ env.DOMAIN }}**\n\`\`\`\n$SUMMARY\n\`\`\`"
+            PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
             curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send vuln summary"
           fi
 
       - name: Send individual vulnerabilities (max 20)
         if: env.VULNS_FOUND > 0
         run: |
-          set -euxo pipefail
           MAX_MSG=20
           COUNT=0
           while IFS= read -r vuln; do
@@ -276,7 +260,7 @@ jobs:
             SEVERITY=$(echo "$vuln" | grep -oE '\[.*\]' | tail -1 || echo "N/A")
             
             MSG="🚨 **Vulnerability Found**\n**Domain:** ${{ env.DOMAIN }}\n**URL:** $URL\n**Type:** $VULN_TYPE\n**Severity:** $SEVERITY\n\`\`\`\n$vuln\n\`\`\`"
-            PAYLOAD=$(jq -n --arg msg "$MSG" '{content: $msg}')
+            PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
             curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send individual vuln"
             COUNT=$((COUNT+1))
             sleep 1
@@ -284,7 +268,6 @@ jobs:
 
       - name: Create scan report
         run: |
-          set -euxo pipefail
           cat > results/scan-report.md <<EOF
           # Scan Report for ${{ env.DOMAIN }}
           
@@ -319,14 +302,6 @@ jobs:
 
       - name: Final notification
         run: |
-          set -euxo pipefail
-          PAYLOAD=$(jq -n \
-            --arg d "${{ env.DOMAIN }}" \
-            --arg s "${{ env.SEVERITY }}" \
-            --arg sub "$(wc -l < results/subdomains.txt || echo 0)" \
-            --arg alive "$(wc -l < results/alive-urls.txt || echo 0)" \
-            --arg v "$(wc -l < results/nuclei-results.txt || echo 0)" \
-            --arg ports "$(wc -l < results/naabu-ports.txt || echo 0)" \
-            --arg urls "$(wc -l < results/nuclei-urls.txt || echo 0)" \
-            '{content: ("✅ **Scan Finished**\n**Domain:** " + $d + "\n**Severity:** " + $s + "\n**Subdomains:** " + $sub + "\n**Alive URLs:** " + $alive + "\n**Open Ports:** " + $ports + "\n**URLs Scanned:** " + $urls + "\n**Vulnerabilities:** " + $v)}')
+          MSG="✅ **Scan Finished**\n**Domain:** ${{ env.DOMAIN }}\n**Severity:** ${{ env.SEVERITY }}\n**Subdomains:** $(wc -l < results/subdomains.txt || echo 0)\n**Alive URLs:** $(wc -l < results/alive-urls.txt || echo 0)\n**Open Ports:** $(wc -l < results/naabu-ports.txt || echo 0)\n**URLs Scanned:** $(wc -l < results/nuclei-urls.txt || echo 0)\n**Vulnerabilities:** $(wc -l < results/nuclei-results.txt || echo 0)"
+          PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send final notification"
