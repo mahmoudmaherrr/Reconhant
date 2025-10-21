@@ -1,4 +1,4 @@
-name: Subdomain & Vulnerability Scanner (Enhanced)
+name: Subdomain & Vulnerability Scanner (Enhanced & Robust)
 
 on:
   workflow_dispatch:
@@ -53,24 +53,26 @@ jobs:
 
       - name: Install system packages & tools
         run: |
+          set -euxo pipefail
           sudo apt-get update
-          # Fixed: Added libpcap-dev for packet capture functionality
           sudo apt-get install -y jq curl unzip git gcc make libpcap-dev
 
-          # Install Go-based tools
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-          go install -v github.com/tomnomnom/waybackurls@latest
-          go install -v github.com/lc/gau/v2/cmd/gau@latest || true
-          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          # Install Go-based tools with error handling
+          echo "Installing Go tools..."
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || echo "subfinder install failed"
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest || echo "nuclei install failed"
+          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest || echo "dnsx install failed"
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest || echo "httpx install failed"
+          go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest || echo "naabu install failed"
+          go install -v github.com/tomnomnom/waybackurls@latest || echo "waybackurls install failed"
+          go install -v github.com/lc/gau/v2/cmd/gau@latest || echo "gau install failed"
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest || echo "katana install failed"
 
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
       - name: Validate secrets
         run: |
+          set -euxo pipefail
           if [ -z "${{ secrets.DISCORD_WEBHOOK }}" ]; then
             echo "::error::DISCORD_WEBHOOK secret is not set"
             exit 1
@@ -78,34 +80,38 @@ jobs:
           echo "DISCORD_WEBHOOK=${{ secrets.DISCORD_WEBHOOK }}" >> $GITHUB_ENV
 
       - name: Create results directory
-        run: mkdir -p results
+        run: |
+          set -euxo pipefail
+          mkdir -p results
 
       - name: Notify Start
         run: |
-          curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
+          set -euxo pipefail
+          # Build JSON payload safely
+          PAYLOAD=$(jq -n \
             --arg c "🔍 **Scan Started**" \
             --arg d "${{ env.DOMAIN }}" \
             --arg t "${{ github.event_name }}" \
             --arg tools "subfinder, dnsx, httpx, naabu, waybackurls, gau, katana, nuclei" \
-            '{content: ($c + "\n**Domain:** " + $d + "\n**Trigger:** " + $t + "\n**Tools:** " + $tools)}')" \
-            "${{ env.DISCORD_WEBHOOK }}" || true
+            '{content: ($c + "\n**Domain:** " + $d + "\n**Trigger:** " + $t + "\n**Tools:** " + $tools)}')
+          
+          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send start notification"
 
       - name: Discover subdomains
         run: |
+          set -euxo pipefail
           echo "Starting subdomain discovery for ${{ env.DOMAIN }}"
           
-          # Use multiple sources for subdomain discovery
-          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt || true
-          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt || true
-          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt || true
+          # Ensure output files exist
+          touch results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt results/combined-subdomains.txt results/subdomains.txt
           
-          # Use katana for additional subdomain discovery
-          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt || true
+          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt || echo "subfinder failed"
+          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt || echo "waybackurls failed"
+          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt || echo "gau failed"
+          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt || echo "katana failed"
           
-          # Combine all sources
           cat results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt | sort -u > results/combined-subdomains.txt
           
-          # Add common subdomains
           cat > results/wordlist.txt <<'WL'
           www
           dev
@@ -137,14 +143,15 @@ jobs:
 
       - name: Resolve & probe alive hosts
         run: |
+          set -euxo pipefail
           echo "Resolving subdomains and checking for alive hosts"
           
-          # Resolve subdomains
-          dnsx -l results/subdomains.txt -silent -a -r 1.1.1.1,8.8.8.8 -o results/resolved.txt || true
+          touch results/resolved.txt results/resolved-hosts.txt results/alive.txt results/alive-urls.txt
+          
+          dnsx -l results/subdomains.txt -silent -a -r 1.1.1.1,8.8.8.8 -o results/resolved.txt || echo "dnsx failed"
           cut -d' ' -f1 results/resolved.txt | cut -d':' -f1 | sort -u > results/resolved-hosts.txt
           
-          # Check for alive hosts
-          httpx -l results/resolved-hosts.txt -silent -follow-redirects -title -status-code -tech-detect -o results/alive.txt || true
+          httpx -l results/resolved-hosts.txt -silent -follow-redirects -title -status-code -tech-detect -o results/alive.txt || echo "httpx failed"
           cut -d' ' -f1 results/alive.txt > results/alive-urls.txt
           
           echo "ALIVE_HOSTS=$(wc -l < results/resolved-hosts.txt)" >> $GITHUB_ENV
@@ -154,9 +161,11 @@ jobs:
       - name: Port scan alive hosts (naabu)
         if: env.PORT_SCAN == 'true'
         run: |
+          set -euxo pipefail
+          touch results/naabu-ports.txt
           if [ -s results/resolved-hosts.txt ]; then
             echo "Starting port scan on alive hosts"
-            naabu -list results/resolved-hosts.txt -silent -top-ports 1000 -o results/naabu-ports.txt || true
+            naabu -list results/resolved-hosts.txt -silent -top-ports 1000 -o results/naabu-ports.txt || echo "naabu failed"
             echo "NAABU_LINES=$(wc -l < results/naabu-ports.txt)" >> $GITHUB_ENV
             echo "Found $NAABU_LINES open ports"
           else
@@ -166,22 +175,19 @@ jobs:
 
       - name: Gather URLs & prepare for Nuclei
         run: |
+          set -euxo pipefail
           echo "Gathering URLs for vulnerability scanning"
           
-          # Get URLs from multiple sources
-          waybackurls "${{ env.DOMAIN }}" > results/wayback-urls.txt || true
-          gau "${{ env.DOMAIN }}" > results/gau-urls.txt || true
+          touch results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt results/candidate-urls.txt results/nuclei-urls.txt
           
-          # Use katana for additional URL discovery
-          cat results/alive-urls.txt | katana -depth 2 -jc -silent -o results/katana-urls.txt || true
+          waybackurls "${{ env.DOMAIN }}" > results/wayback-urls.txt || echo "waybackurls for URLs failed"
+          gau "${{ env.DOMAIN }}" > results/gau-urls.txt || echo "gau for URLs failed"
+          cat results/alive-urls.txt | katana -depth 2 -jc -silent -o results/katana-urls.txt || echo "katana for URLs failed"
           
-          # Combine all URLs
           cat results/alive-urls.txt results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt | sort -u > results/candidate-urls.txt
           
-          # Filter out common file extensions
           grep -viE "\.(jpg|jpeg|png|gif|svg|css|js|woff|woff2|ico|bmp|mp4|mp3|pdf|zip|tar|gz)$" results/candidate-urls.txt > results/nuclei-urls.txt
           
-          # Limit the number of URLs if needed
           if [ $(wc -l < results/nuclei-urls.txt) -gt ${{ env.MAX_URLS }} ]; then
             shuf -n ${{ env.MAX_URLS }} results/nuclei-urls.txt > results/nuclei-urls-limited.txt
             mv results/nuclei-urls-limited.txt results/nuclei-urls.txt
@@ -191,89 +197,94 @@ jobs:
           echo "Prepared $NUCLEI_URLS URLs for vulnerability scanning"
 
       - name: Update Nuclei templates
-        run: nuclei -update-templates || true
+        run: |
+          set -euxo pipefail
+          nuclei -update-templates || echo "Nuclei template update failed"
 
       - name: Run Nuclei on URLs
         run: |
+          set -euxo pipefail
+          touch results/nuclei-urls-results.txt
           if [ -s results/nuclei-urls.txt ]; then
             echo "Running Nuclei on URLs"
-            nuclei -l results/nuclei-urls.txt -severity "${{ env.SEVERITY }}" -t ~/nuclei-templates -o results/nuclei-urls-results.txt -silent || true
-          else
-            touch results/nuclei-urls-results.txt
+            nuclei -l results/nuclei-urls.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-urls-results.txt -silent || echo "Nuclei on URLs failed"
           fi
 
       - name: Run Nuclei on hosts
         run: |
+          set -euxo pipefail
+          touch results/nuclei-hosts-results.txt
           if [ -s results/resolved-hosts.txt ]; then
             echo "Running Nuclei on hosts"
-            nuclei -l results/resolved-hosts.txt -severity "${{ env.SEVERITY }}" -t ~/nuclei-templates -o results/nuclei-hosts-results.txt -silent || true
-          else
-            touch results/nuclei-hosts-results.txt
+            nuclei -l results/resolved-hosts.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-hosts-results.txt -silent || echo "Nuclei on hosts failed"
           fi
 
       - name: Process Nuclei results
         run: |
-          # Combine results and remove duplicates
+          set -euxo pipefail
+          touch results/nuclei-results.txt
           cat results/nuclei-urls-results.txt results/nuclei-hosts-results.txt | sed '/^$/d' | sort -u > results/nuclei-results.txt
           echo "VULNS_FOUND=$(wc -l < results/nuclei-results.txt || echo 0)" >> $GITHUB_ENV
           echo "Found $VULNS_FOUND vulnerabilities"
           
-          # Create a summary of vulnerabilities by type
           if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
-            grep -o '\[.*\]' results/nuclei-results.txt | sort | uniq -c | sort -nr > results/vuln-summary.txt
+            grep -oE '\[[^]]+\]' results/nuclei-results.txt | sort | uniq -c | sort -nr > results/vuln-summary.txt || echo "Failed to create vuln summary"
+          else
+            touch results/vuln-summary.txt
           fi
 
       - name: Notify Nuclei Summary
         run: |
+          set -euxo pipefail
           if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
-            curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
+            PAYLOAD=$(jq -n \
               --arg d "${{ env.DOMAIN }}" \
               --arg v "${{ env.VULNS_FOUND }}" \
               --arg s "${{ env.SEVERITY }}" \
-              '{content: ("🚨 **Vulnerabilities Found!**\n**Domain:** " + $d + "\n**Severity Filter:** " + $s + "\n**Count:** " + $v)}')" \
-              "${{ env.DISCORD_WEBHOOK }}" || true
+              '{content: ("🚨 **Vulnerabilities Found!**\n**Domain:** " + $d + "\n**Severity Filter:** " + $s + "\n**Count:** " + $v)}')
           else
-            curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
+            PAYLOAD=$(jq -n \
               --arg d "${{ env.DOMAIN }}" \
               --arg s "${{ env.SEVERITY }}" \
-              '{content: ("✅ **Nuclei Complete**\n**Domain:** " + $d + "\n**Severity Filter:** " + $s + "\nNo vulnerabilities found.")}')" \
-              "${{ env.DISCORD_WEBHOOK }}" || true
+              '{content: ("✅ **Nuclei Complete**\n**Domain:** " + $d + "\n**Severity Filter:** " + $s + "\nNo vulnerabilities found.")}')
           fi
+          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send summary notification"
 
       - name: Send vulnerability summary
         if: env.VULNS_FOUND > 0
         run: |
+          set -euxo pipefail
           if [ -s results/vuln-summary.txt ]; then
             SUMMARY=$(cat results/vuln-summary.txt | head -10 | awk '{print $2 " - " $1 " occurrences"}' | paste -sd '\n' -)
-            curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
+            PAYLOAD=$(jq -n \
               --arg d "${{ env.DOMAIN }}" \
               --arg s "$SUMMARY" \
-              '{content: ("📊 **Vulnerability Summary for " + $d + "**\n```\n" + $s + "\n```")}' \
-              "${{ env.DISCORD_WEBHOOK }}" || true
+              '{content: ("📊 **Vulnerability Summary for " + $d + "**\n```\n" + $s + "\n```")}')
+            curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send vuln summary"
           fi
 
       - name: Send individual vulnerabilities (max 20)
         if: env.VULNS_FOUND > 0
         run: |
+          set -euxo pipefail
           MAX_MSG=20
           COUNT=0
           while IFS= read -r vuln; do
             [ "$COUNT" -ge "$MAX_MSG" ] && break
-            # Extract key information from the vulnerability
-            URL=$(echo "$vuln" | grep -oE 'https?://[^[:space:]]+' | head -1)
-            VULN_TYPE=$(echo "$vuln" | grep -oE '\[[^]]+\]' | head -1)
-            SEVERITY=$(echo "$vuln" | grep -oE '\[.*\]' | tail -1)
+            URL=$(echo "$vuln" | grep -oE 'https?://[^[:space:]]+' | head -1 || echo "N/A")
+            VULN_TYPE=$(echo "$vuln" | grep -oE '\[[^]]+\]' | head -1 || echo "N/A")
+            SEVERITY=$(echo "$vuln" | grep -oE '\[.*\]' | tail -1 || echo "N/A")
             
             MSG="🚨 **Vulnerability Found**\n**Domain:** ${{ env.DOMAIN }}\n**URL:** $URL\n**Type:** $VULN_TYPE\n**Severity:** $SEVERITY\n\`\`\`\n$vuln\n\`\`\`"
-            curl -s -X POST -H "Content-Type: application/json" \
-              -d "{\"content\": $(echo "$MSG" | jq -Rs .)}" \
-              "${{ env.DISCORD_WEBHOOK }}" || true
+            PAYLOAD=$(jq -n --arg msg "$MSG" '{content: $msg}')
+            curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send individual vuln"
             COUNT=$((COUNT+1))
             sleep 1
           done < results/nuclei-results.txt
 
       - name: Create scan report
         run: |
+          set -euxo pipefail
           cat > results/scan-report.md <<EOF
           # Scan Report for ${{ env.DOMAIN }}
           
@@ -308,7 +319,8 @@ jobs:
 
       - name: Final notification
         run: |
-          curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
+          set -euxo pipefail
+          PAYLOAD=$(jq -n \
             --arg d "${{ env.DOMAIN }}" \
             --arg s "${{ env.SEVERITY }}" \
             --arg sub "$(wc -l < results/subdomains.txt || echo 0)" \
@@ -316,8 +328,5 @@ jobs:
             --arg v "$(wc -l < results/nuclei-results.txt || echo 0)" \
             --arg ports "$(wc -l < results/naabu-ports.txt || echo 0)" \
             --arg urls "$(wc -l < results/nuclei-urls.txt || echo 0)" \
-            '{content: ("✅ **Scan Finished**\n**Domain:** " + $d + "\n**Severity:** " + $s + "\n**Subdomains:** " + $sub + "\n**Alive URLs:** " + $alive + "\n**Open Ports:** " + $ports + "\n**URLs Scanned:** " + $urls + "\n**Vulnerabilities:** " + $v)}')" \
-            "${{ env.DISCORD_WEBHOOK }}" || true
-            --arg v "$(wc -l < nuclei-results.txt || echo 0)" \
-            '{content: ("✅ **Scan Finished**\n**Domain:** " + $d + "\n**Severity:** " + $s + "\n**Subdomains:** " + $sub + "\n**Alive URLs:** " + $alive + "\n**Vulnerabilities:** " + $v)}')" \
-            "${{ env.DISCORD_WEBHOOK }}" || true
+            '{content: ("✅ **Scan Finished**\n**Domain:** " + $d + "\n**Severity:** " + $s + "\n**Subdomains:** " + $sub + "\n**Alive URLs:** " + $alive + "\n**Open Ports:** " + $ports + "\n**URLs Scanned:** " + $urls + "\n**Vulnerabilities:** " + $v)}')
+          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send final notification"
