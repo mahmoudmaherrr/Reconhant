@@ -1,4 +1,4 @@
-name: Subdomain & Vulnerability Scanner (Enhanced)
+name: Subdomain & Vulnerability Scanner
 
 on:
   workflow_dispatch:
@@ -7,22 +7,14 @@ on:
         description: 'Domain to scan'
         required: true
         default: 'example.com'
-      severity:
-        description: 'Nuclei severity filter (comma separated, e.g. critical,high,medium)'
-        required: false
-        default: 'critical,high,medium'
   schedule:
     - cron: '0 6 * * 1'  # Every Monday at 6 AM UTC
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    env:
-      DOMAIN: example.com
-      SEVERITY: critical,high,medium
-
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -30,23 +22,13 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Install system packages & tools
+      - name: Install Tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq curl unzip git gcc make
-
-          # Install Go-based tools
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-          go install -v github.com/tomnomnom/waybackurls@latest
-          go install -v github.com/lc/gau/v2/cmd/gau@latest || true
+          sudo apt-get update && sudo apt-get install -y jq
 
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-
-      - name: Validate secrets
+      - name: Validate Secrets
         run: |
           if [ -z "${{ secrets.DISCORD_WEBHOOK }}" ]; then
             echo "::error::DISCORD_WEBHOOK secret is not set"
@@ -54,149 +36,86 @@ jobs:
           fi
           echo "DISCORD_WEBHOOK=${{ secrets.DISCORD_WEBHOOK }}" >> $GITHUB_ENV
 
-      - name: Set domain & severity
+      - name: Set Domain
+        id: set_domain
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "DOMAIN=${{ github.event.inputs.domain }}" >> $GITHUB_ENV
-            echo "SEVERITY=${{ github.event.inputs.severity }}" >> $GITHUB_ENV
+          else
+            echo "DOMAIN=example.com" >> $GITHUB_ENV
           fi
 
       - name: Notify Start
         run: |
-          curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
-            --arg c "🔍 **Scan Started**" \
-            --arg d "${{ env.DOMAIN }}" \
-            --arg t "${{ github.event_name }}" \
-            --arg tools "subfinder, dnsx, httpx, naabu, waybackurls, gau, nuclei" \
-            '{content: ($c + "\n**Domain:** " + $d + "\n**Trigger:** " + $t + "\n**Tools:** " + $tools)}')" \
-            "${{ env.DISCORD_WEBHOOK }}" || true
+          curl -X POST -H "Content-Type: application/json" -d '{
+            "content": "🔍 **Scan Started**\n**Domain:** ${{ env.DOMAIN }}\n**Trigger:** ${{ github.event_name }}\n**Tools:** Subfinder + Nuclei"
+          }' "${{ env.DISCORD_WEBHOOK }}"
 
-      - name: Discover subdomains
+      - name: Run Subfinder
         run: |
-          subfinder -d "${{ env.DOMAIN }}" -all -silent -o subfinder.txt || true
-          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > wayback_hosts.txt || true
-          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > gau_hosts.txt || true
-
-          cat subfinder.txt wayback_hosts.txt gau_hosts.txt | sort -u > combined-subdomains.txt
-
-          cat > wordlist.txt <<'WL'
-www
-dev
-staging
-test
-api
-beta
-mail
-admin
-portal
-app
-WL
-          for p in $(cat wordlist.txt); do
-            echo "${p}.${{ env.DOMAIN }}"
-          done >> combined-subdomains.txt
-
-          sort -u combined-subdomains.txt > subdomains.txt
+          subfinder -d ${{ env.DOMAIN }} -silent -o subdomains.txt
           echo "SUBDOMAINS_FOUND=$(wc -l < subdomains.txt)" >> $GITHUB_ENV
 
-      - name: Resolve & probe alive hosts
+      - name: Notify Subfinder Results
         run: |
-          dnsx -l subdomains.txt -silent -a -r 1.1.1.1,8.8.8.8 -o resolved.txt || true
-          cut -d' ' -f1 resolved.txt | cut -d':' -f1 | sort -u > resolved-hosts.txt
-
-          httpx -l resolved-hosts.txt -silent -follow-redirects -title -status-code -o alive.txt || true
-          cut -d' ' -f1 alive.txt > alive-urls.txt
-
-          echo "ALIVE_HOSTS=$(wc -l < resolved-hosts.txt)" >> $GITHUB_ENV
-          echo "ALIVE_URLS=$(wc -l < alive-urls.txt)" >> $GITHUB_ENV
-
-      - name: Port scan alive hosts (naabu)
-        run: |
-          if [ -s resolved-hosts.txt ]; then
-            naabu -list resolved-hosts.txt -silent -top-ports 100 -o naabu-ports.txt || true
-            echo "NAABU_LINES=$(wc -l < naabu-ports.txt)" >> $GITHUB_ENV
-          else
-            echo "NAABU_LINES=0" >> $GITHUB_ENV
+          # Read subdomains content
+          SUBDOMAINS_CONTENT=$(cat subdomains.txt)
+          
+          # Create message
+          MESSAGE="✅ **Subfinder Complete**\n**Domain:** ${{ env.DOMAIN }}\n**Subdomains Found:** ${{ env.SUBDOMAINS_FOUND }}\n\n\`\`\`\n$SUBDOMAINS_CONTENT\n\`\`\`"
+          
+          # Truncate if too long
+          if [ ${#MESSAGE} -gt 1900 ]; then
+            TRUNCATED=$(echo "$SUBDOMAINS_CONTENT" | head -c 1800)
+            MESSAGE="✅ **Subfinder Complete**\n**Domain:** ${{ env.DOMAIN }}\n**Subdomains Found:** ${{ env.SUBDOMAINS_FOUND }}\n\n\`\`\`\n$TRUNCATED... [truncated]\n\`\`\`"
           fi
-
-      - name: Gather URLs & prepare for Nuclei
-        run: |
-          waybackurls "${{ env.DOMAIN }}" > wayback-urls.txt || true
-          gau "${{ env.DOMAIN }}" > gau-urls.txt || true
-
-          cat alive-urls.txt wayback-urls.txt gau-urls.txt | sort -u > candidate-urls.txt
-          grep -viE "\.(jpg|jpeg|png|gif|svg|css|js|woff|woff2|ico|bmp|mp4|mp3)$" candidate-urls.txt > nuclei-urls.txt
-
-          echo "NUCLEI_URLS=$(wc -l < nuclei-urls.txt)" >> $GITHUB_ENV
-
-      - name: Update Nuclei templates
-        run: nuclei -update-templates || true
+          
+          # Send to Discord
+          curl -X POST -H "Content-Type: application/json" \
+            -d "{\"content\": $(echo "$MESSAGE" | jq -Rs .)}" \
+            "${{ env.DISCORD_WEBHOOK }}"
 
       - name: Run Nuclei
         run: |
-          if [ -s nuclei-urls.txt ]; then
-            nuclei -l nuclei-urls.txt -severity "${{ env.SEVERITY }}" -t ~/nuclei-templates -o nuclei-urls-results.txt -silent || true
-          fi
-
-          if [ -s resolved-hosts.txt ]; then
-            httpx -l resolved-hosts.txt -silent -status-code -o hosts-probed.txt || true
-            cut -d' ' -f1 hosts-probed.txt > hosts-for-nuclei.txt || true
-            nuclei -l hosts-for-nuclei.txt -severity "${{ env.SEVERITY }}" -t ~/nuclei-templates -o nuclei-hosts-results.txt -silent || true
-          fi
-
-          cat nuclei-urls-results.txt nuclei-hosts-results.txt | sed '/^$/d' > nuclei-results.txt || true
-          echo "VULNS_FOUND=$(wc -l < nuclei-results.txt || echo 0)" >> $GITHUB_ENV
+          nuclei -l subdomains.txt -severity critical,high,medium -silent -o nuclei-results.txt
+          echo "VULNS_FOUND=$(wc -l < nuclei-results.txt)" >> $GITHUB_ENV
 
       - name: Notify Nuclei Summary
         run: |
-          if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
-            curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
-              --arg d "${{ env.DOMAIN }}" \
-              --arg v "${{ env.VULNS_FOUND }}" \
-              '{content: ("🚨 **Vulnerabilities Found!**\n**Domain:** " + $d + "\n**Count:** " + $v)}')" \
-              "${{ env.DISCORD_WEBHOOK }}" || true
+          if [ ${{ env.VULNS_FOUND }} -gt 0 ]; then
+            curl -X POST -H "Content-Type: application/json" -d '{
+              "content": "🚨 **Vulnerabilities Found!**\n**Domain:** ${{ env.DOMAIN }}\n**Count:** ${{ env.VULNS_FOUND }}\n\nSending each vulnerability as a separate message..."
+            }' "${{ env.DISCORD_WEBHOOK }}"
           else
-            curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
-              --arg d "${{ env.DOMAIN }}" \
-              '{content: ("✅ **Nuclei Complete**\n**Domain:** " + $d + "\nNo vulnerabilities found.")}')" \
-              "${{ env.DISCORD_WEBHOOK }}" || true
+            curl -X POST -H "Content-Type: application/json" -d '{
+              "content": "✅ **Nuclei Complete**\n**Domain:** ${{ env.DOMAIN }}\nNo critical/high/medium vulnerabilities found"
+            }' "${{ env.DISCORD_WEBHOOK }}"
           fi
 
-      - name: Send individual vulnerabilities (max 20)
+      - name: Send Individual Vulnerabilities
         if: env.VULNS_FOUND > 0
         run: |
-          MAX_MSG=20
-          COUNT=0
+          # Read each line and send as separate message
           while IFS= read -r vuln; do
-            [ "$COUNT" -ge "$MAX_MSG" ] && break
-            MSG="🚨 **Vulnerability Found**\n**Domain:** ${{ env.DOMAIN }}\n\`\`\`\n$vuln\n\`\`\`"
-            curl -s -X POST -H "Content-Type: application/json" \
-              -d "{\"content\": $(echo "$MSG" | jq -Rs .)}" \
-              "${{ env.DISCORD_WEBHOOK }}" || true
-            COUNT=$((COUNT+1))
+            # Create message for this vulnerability
+            MESSAGE="🚨 **Vulnerability Found**\n**Domain:** ${{ env.DOMAIN }}\n\`\`\`\n$vuln\n\`\`\`"
+            
+            # Send to Discord
+            curl -X POST -H "Content-Type: application/json" \
+              -d "{\"content\": $(echo "$MESSAGE" | jq -Rs .)}" \
+              "${{ env.DISCORD_WEBHOOK }}"
+              
+            # Small delay to avoid rate limiting
             sleep 1
           done < nuclei-results.txt
 
-      - name: Upload artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: scan-results
           path: |
             subdomains.txt
-            resolved-hosts.txt
-            alive-urls.txt
-            candidate-urls.txt
             nuclei-results.txt
-            nuclei-urls-results.txt
-            nuclei-hosts-results.txt
-            naabu-ports.txt
-
-      - name: Final notification
-        run: |
-          curl -s -X POST -H "Content-Type: application/json" -d "$(jq -n \
-            --arg d "${{ env.DOMAIN }}" \
-            --arg s "${{ env.SEVERITY }}" \
-            --arg sub "$(wc -l < subdomains.txt || echo 0)" \
-            --arg alive "$(wc -l < alive-urls.txt || echo 0)" \
             --arg v "$(wc -l < nuclei-results.txt || echo 0)" \
             '{content: ("✅ **Scan Finished**\n**Domain:** " + $d + "\n**Severity:** " + $s + "\n**Subdomains:** " + $sub + "\n**Alive URLs:** " + $alive + "\n**Vulnerabilities:** " + $v)}')" \
             "${{ env.DISCORD_WEBHOOK }}" || true
