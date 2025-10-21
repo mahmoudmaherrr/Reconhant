@@ -54,7 +54,8 @@ jobs:
       - name: Install system packages & tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq curl unzip git gcc make masscan
+          # Fixed: Added libpcap-dev for packet capture functionality
+          sudo apt-get install -y jq curl unzip git gcc make libpcap-dev
 
           # Install Go-based tools
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
