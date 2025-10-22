@@ -1,4 +1,4 @@
-name: Subdomain & Vulnerability Scanner (Final & Robust)
+name: Subdomain & Vulnerability Scanner (Granular Debugging)
 
 on:
   workflow_dispatch:
@@ -57,17 +57,30 @@ jobs:
           sudo apt-get install -y jq curl unzip git gcc make libpcap-dev
 
           echo "Installing Go tools..."
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || echo "subfinder install failed"
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest || echo "nuclei install failed"
-          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest || echo "dnsx install failed"
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest || echo "httpx install failed"
-          go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest || echo "naabu install failed"
-          go install -v github.com/tomnomnom/waybackurls@latest || echo "waybackurls install failed"
-          go install -v github.com/lc/gau/v2/cmd/gau@latest || echo "gau install failed"
-          go install -v github.com/projectdiscovery/katana/cmd/katana@latest || echo "katana install failed"
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+          go install -v github.com/tomnomnom/waybackurls@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest || echo "gau install failed, will continue without it"
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest || echo "katana install failed, will continue without it"
 
           echo "$HOME/go/bin" >> $GITHUB_PATH
           echo "Tool installation complete."
+
+      - name: Debug - Check tool installations
+        run: |
+          echo "--- Checking tool paths ---"
+          which subfinder
+          which nuclei
+          which dnsx
+          which httpx
+          which naabu
+          which waybackurls
+          which gau || echo "gau not found"
+          which katana || echo "katana not found"
+          echo "--- Tool check complete ---"
 
       - name: Validate secrets
         run: |
@@ -82,76 +95,88 @@ jobs:
 
       - name: Notify Start
         run: |
-          MSG="🔍 **Scan Started**\n**Domain:** ${{ env.DOMAIN }}\n**Trigger:** ${{ github.event_name }}\n**Tools:** subfinder, dnsx, httpx, naabu, waybackurls, gau, katana, nuclei"
+          MSG="🔍 **Scan Started**\n**Domain:** ${{ env.DOMAIN }}\n**Trigger:** ${{ github.event_name }}"
           PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send start notification"
 
-      - name: Discover subdomains
+      # --- Granular Subdomain Discovery Steps ---
+
+      - name: 1. Discover with Subfinder
         run: |
-          echo "--- Starting subdomain discovery for ${{ env.DOMAIN }} ---"
-          
-          # Create all necessary files to avoid 'file not found' errors
-          touch results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt results/combined-subdomains.txt results/subdomains.txt results/wordlist.txt
-          
-          # Run each tool and append results, ensuring the command doesn't stop the script
-          echo "Running subfinder..."
-          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt || echo "subfinder finished or failed"
-          
-          echo "Running waybackurls..."
-          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt || echo "waybackurls finished or failed"
-          
-          echo "Running gau..."
-          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt || echo "gau finished or failed"
-          
-          echo "Running katana..."
-          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt || echo "katana finished or failed"
-          
-          # Combine all sources
-          echo "Combining results..."
+          echo "--- Running subfinder ---"
+          touch results/subfinder.txt
+          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt
+          if [ $? -ne 0 ]; then
+            echo "subfinder failed, but continuing."
+          fi
+          echo "subfinder found $(wc -l < results/subfinder.txt) subdomains."
+
+      - name: 2. Discover with Waybackurls
+        run: |
+          echo "--- Running waybackurls ---"
+          touch results/wayback_hosts.txt
+          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt
+          if [ $? -ne 0 ]; then
+            echo "waybackurls failed, but continuing."
+          fi
+          echo "waybackurls found $(wc -l < results/wayback_hosts.txt) hosts."
+
+      - name: 3. Discover with GAU
+        run: |
+          echo "--- Running gau ---"
+          touch results/gau_hosts.txt
+          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt
+          if [ $? -ne 0 ]; then
+            echo "gau failed, but continuing."
+          fi
+          echo "gau found $(wc -l < results/gau_hosts.txt) hosts."
+
+      - name: 4. Discover with Katana
+        run: |
+          echo "--- Running katana ---"
+          touch results/katana_hosts.txt
+          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt
+          if [ $? -ne 0 ]; then
+            echo "katana failed, but continuing."
+          fi
+          echo "katana found $(wc -l < results/katana_hosts.txt) hosts."
+
+      - name: 5. Combine & Add Common Subdomains
+        run: |
+          echo "--- Combining all results ---"
+          touch results/combined-subdomains.txt results/subdomains.txt
           cat results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt | sort -u > results/combined-subdomains.txt
           
-          # Add common subdomains from a wordlist
-          echo "Adding common subdomains..."
-          cat > results/wordlist.txt <<'WL'
-          www
-          dev
-          staging
-          test
-          api
-          beta
-          mail
-          admin
-          portal
-          app
-          m
-          mobile
-          cdn
-          assets
-          static
-          images
-          blog
-          shop
-          secure
-          WL
+          echo "--- Adding common subdomains ---"
+          echo "www.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "dev.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "staging.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "test.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "api.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "beta.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "mail.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "admin.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "portal.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "app.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "m.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "mobile.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "cdn.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "assets.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "static.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "blog.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "shop.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
+          echo "secure.${{ env.DOMAIN }}" >> results/combined-subdomains.txt
           
-          # Use a while loop for safer reading of the wordlist
-          while IFS= read -r p; do
-            echo "${p}.${{ env.DOMAIN }}"
-          done < results/wordlist.txt >> results/combined-subdomains.txt
-          
-          # Final sort and count
-          echo "Finalizing subdomain list..."
           sort -u results/combined-subdomains.txt > results/subdomains.txt
-          
-          # Set the environment variable for the next steps
           SUBDOMAINS_COUNT=$(wc -l < results/subdomains.txt)
           echo "SUBDOMAINS_FOUND=$SUBDOMAINS_COUNT" >> $GITHUB_ENV
-          echo "--- Found $SUBDOMAINS_COUNT subdomains ---"
+          echo "--- Final count: $SUBDOMAINS_COUNT subdomains ---"
+
+      # --- End of Granular Steps ---
 
       - name: Resolve & probe alive hosts
         run: |
           echo "--- Resolving subdomains and checking for alive hosts ---"
-          
           touch results/resolved.txt results/resolved-hosts.txt results/alive.txt results/alive-urls.txt
           
           dnsx -l results/subdomains.txt -silent -a -r 1.1.1.1,8.8.8.8 -o results/resolved.txt || echo "dnsx finished with no results"
@@ -184,7 +209,6 @@ jobs:
       - name: Gather URLs & prepare for Nuclei
         run: |
           echo "--- Gathering URLs for vulnerability scanning ---"
-          
           touch results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt results/candidate-urls.txt results/nuclei-urls.txt
           
           waybackurls "${{ env.DOMAIN }}" > results/wayback-urls.txt || echo "waybackurls for URLs finished with no results"
@@ -206,10 +230,7 @@ jobs:
           echo "--- Prepared $NUCLEI_URLS_COUNT URLs for vulnerability scanning ---"
 
       - name: Update Nuclei templates
-        run: |
-          echo "--- Updating Nuclei templates ---"
-          nuclei -update-templates || echo "Nuclei template update failed, using existing templates."
-          echo "--- Nuclei template update complete ---"
+        run: nuclei -update-templates || echo "Nuclei template update failed, using existing templates."
 
       - name: Run Nuclei on URLs
         run: |
@@ -217,8 +238,6 @@ jobs:
           touch results/nuclei-urls-results.txt
           if [ -s results/nuclei-urls.txt ]; then
             nuclei -l results/nuclei-urls.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-urls-results.txt -silent || echo "Nuclei scan on URLs finished with errors"
-          else
-            echo "No URLs to scan with Nuclei."
           fi
 
       - name: Run Nuclei on hosts
@@ -227,8 +246,6 @@ jobs:
           touch results/nuclei-hosts-results.txt
           if [ -s results/resolved-hosts.txt ]; then
             nuclei -l results/resolved-hosts.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-hosts-results.txt -silent || echo "Nuclei scan on hosts finished with errors"
-          else
-            echo "No hosts to scan with Nuclei."
           fi
 
       - name: Process Nuclei results
@@ -242,29 +259,17 @@ jobs:
           
           if [ "$VULNS_COUNT" -gt 0 ]; then
             grep -oE '\[[^]]+\]' results/nuclei-results.txt | sort | uniq -c | sort -nr > results/vuln-summary.txt || echo "Failed to create vuln summary"
-          else
-            touch results/vuln-summary.txt
           fi
 
       - name: Notify Nuclei Summary
         run: |
           if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
-            MSG="🚨 **Vulnerabilities Found!**\n**Domain:** ${{ env.DOMAIN }}\n**Severity Filter:** ${{ env.SEVERITY }}\n**Count:** ${{ env.VULNS_FOUND }}"
+            MSG="🚨 **Vulnerabilities Found!**\n**Domain:** ${{ env.DOMAIN }}\n**Count:** ${{ env.VULNS_FOUND }}"
           else
-            MSG="✅ **Nuclei Complete**\n**Domain:** ${{ env.DOMAIN }}\n**Severity Filter:** ${{ env.SEVERITY }}\nNo vulnerabilities found."
+            MSG="✅ **Nuclei Complete**\n**Domain:** ${{ env.DOMAIN }}\nNo vulnerabilities found."
           fi
           PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send summary notification"
-
-      - name: Send vulnerability summary
-        if: env.VULNS_FOUND > 0
-        run: |
-          if [ -s results/vuln-summary.txt ]; then
-            SUMMARY=$(cat results/vuln-summary.txt | head -10 | awk '{print $2 " - " $1 " occurrences"}' | paste -sd '\n' -)
-            MSG="📊 **Vulnerability Summary for ${{ env.DOMAIN }}**\n\`\`\`\n$SUMMARY\n\`\`\`"
-            PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
-            curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send vuln summary"
-          fi
 
       - name: Send individual vulnerabilities (max 20)
         if: env.VULNS_FOUND > 0
@@ -277,7 +282,7 @@ jobs:
             VULN_TYPE=$(echo "$vuln" | grep -oE '\[[^]]+\]' | head -1 || echo "N/A")
             SEVERITY=$(echo "$vuln" | grep -oE '\[.*\]' | tail -1 || echo "N/A")
             
-            MSG="🚨 **Vulnerability Found**\n**Domain:** ${{ env.DOMAIN }}\n**URL:** $URL\n**Type:** $VULN_TYPE\n**Severity:** $SEVERITY\n\`\`\`\n$vuln\n\`\`\`"
+            MSG="🚨 **Vulnerability Found**\n**URL:** $URL\n**Type:** $VULN_TYPE\n**Severity:** $SEVERITY\n\`\`\`\n$vuln\n\`\`\`"
             PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
             curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send individual vuln"
             COUNT=$((COUNT+1))
@@ -291,7 +296,6 @@ jobs:
           
           ## Scan Summary
           - **Domain:** ${{ env.DOMAIN }}
-          - **Severity Filter:** ${{ env.SEVERITY }}
           - **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
           ## Results
@@ -320,6 +324,6 @@ jobs:
 
       - name: Final notification
         run: |
-          MSG="✅ **Scan Finished**\n**Domain:** ${{ env.DOMAIN }}\n**Severity:** ${{ env.SEVERITY }}\n**Subdomains:** $(wc -l < results/subdomains.txt || echo 0)\n**Alive URLs:** $(wc -l < results/alive-urls.txt || echo 0)\n**Open Ports:** $(wc -l < results/naabu-ports.txt || echo 0)\n**URLs Scanned:** $(wc -l < results/nuclei-urls.txt || echo 0)\n**Vulnerabilities:** $(wc -l < results/nuclei-results.txt || echo 0)"
+          MSG="✅ **Scan Finished**\n**Domain:** ${{ env.DOMAIN }}\n**Subdomains:** ${{ env.SUBDOMAINS_FOUND }}\n**Alive URLs:** ${{ env.ALIVE_URLS }}\n**Vulnerabilities:** ${{ env.VULNS_FOUND }}"
           PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send final notification"
