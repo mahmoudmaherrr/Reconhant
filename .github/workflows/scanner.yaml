@@ -1,4 +1,4 @@
-name: Subdomain & Vulnerability Scanner (Robust & Reliable)
+name: Subdomain & Vulnerability Scanner (Final & Robust)
 
 on:
   workflow_dispatch:
@@ -53,7 +53,6 @@ jobs:
 
       - name: Install system packages & tools
         run: |
-          set -uo pipefail # Exit on unset vars and pipe failures
           sudo apt-get update
           sudo apt-get install -y jq curl unzip git gcc make libpcap-dev
 
@@ -89,18 +88,30 @@ jobs:
 
       - name: Discover subdomains
         run: |
-          set -uo pipefail
           echo "--- Starting subdomain discovery for ${{ env.DOMAIN }} ---"
           
-          touch results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt results/combined-subdomains.txt results/subdomains.txt
+          # Create all necessary files to avoid 'file not found' errors
+          touch results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt results/combined-subdomains.txt results/subdomains.txt results/wordlist.txt
           
-          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt || echo "subfinder finished with no results"
-          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt || echo "waybackurls finished with no results"
-          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt || echo "gau finished with no results"
-          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt || echo "katana finished with no results"
+          # Run each tool and append results, ensuring the command doesn't stop the script
+          echo "Running subfinder..."
+          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt || echo "subfinder finished or failed"
           
+          echo "Running waybackurls..."
+          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt || echo "waybackurls finished or failed"
+          
+          echo "Running gau..."
+          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt || echo "gau finished or failed"
+          
+          echo "Running katana..."
+          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt || echo "katana finished or failed"
+          
+          # Combine all sources
+          echo "Combining results..."
           cat results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt | sort -u > results/combined-subdomains.txt
           
+          # Add common subdomains from a wordlist
+          echo "Adding common subdomains..."
           cat > results/wordlist.txt <<'WL'
           www
           dev
@@ -122,17 +133,23 @@ jobs:
           shop
           secure
           WL
-          for p in $(cat results/wordlist.txt); do
-            echo "${p}.${{ env.DOMAIN }}"
-          done >> results/combined-subdomains.txt
           
+          # Use a while loop for safer reading of the wordlist
+          while IFS= read -r p; do
+            echo "${p}.${{ env.DOMAIN }}"
+          done < results/wordlist.txt >> results/combined-subdomains.txt
+          
+          # Final sort and count
+          echo "Finalizing subdomain list..."
           sort -u results/combined-subdomains.txt > results/subdomains.txt
-          echo "SUBDOMAINS_FOUND=$(wc -l < results/subdomains.txt)" >> $GITHUB_ENV
-          echo "--- Found $SUBDOMAINS_FOUND subdomains ---"
+          
+          # Set the environment variable for the next steps
+          SUBDOMAINS_COUNT=$(wc -l < results/subdomains.txt)
+          echo "SUBDOMAINS_FOUND=$SUBDOMAINS_COUNT" >> $GITHUB_ENV
+          echo "--- Found $SUBDOMAINS_COUNT subdomains ---"
 
       - name: Resolve & probe alive hosts
         run: |
-          set -uo pipefail
           echo "--- Resolving subdomains and checking for alive hosts ---"
           
           touch results/resolved.txt results/resolved-hosts.txt results/alive.txt results/alive-urls.txt
@@ -143,20 +160,22 @@ jobs:
           httpx -l results/resolved-hosts.txt -silent -follow-redirects -title -status-code -tech-detect -o results/alive.txt || echo "httpx finished with no results"
           cut -d' ' -f1 results/alive.txt > results/alive-urls.txt
           
-          echo "ALIVE_HOSTS=$(wc -l < results/resolved-hosts.txt)" >> $GITHUB_ENV
-          echo "ALIVE_URLS=$(wc -l < results/alive-urls.txt)" >> $GITHUB_ENV
-          echo "--- Found $ALIVE_HOSTS resolved hosts and $ALIVE_URLS alive URLs ---"
+          ALIVE_HOSTS_COUNT=$(wc -l < results/resolved-hosts.txt)
+          ALIVE_URLS_COUNT=$(wc -l < results/alive-urls.txt)
+          echo "ALIVE_HOSTS=$ALIVE_HOSTS_COUNT" >> $GITHUB_ENV
+          echo "ALIVE_URLS=$ALIVE_URLS_COUNT" >> $GITHUB_ENV
+          echo "--- Found $ALIVE_HOSTS_COUNT resolved hosts and $ALIVE_URLS_COUNT alive URLs ---"
 
       - name: Port scan alive hosts (naabu)
         if: env.PORT_SCAN == 'true'
         run: |
-          set -uo pipefail
           echo "--- Starting port scan on alive hosts ---"
           touch results/naabu-ports.txt
           if [ -s results/resolved-hosts.txt ]; then
             naabu -list results/resolved-hosts.txt -silent -top-ports 1000 -o results/naabu-ports.txt || echo "naabu finished with no results"
-            echo "NAABU_LINES=$(wc -l < results/naabu-ports.txt)" >> $GITHUB_ENV
-            echo "--- Found $NAABU_LINES open ports ---"
+            NAABU_COUNT=$(wc -l < results/naabu-ports.txt)
+            echo "NAABU_LINES=$NAABU_COUNT" >> $GITHUB_ENV
+            echo "--- Found $NAABU_COUNT open ports ---"
           else
             echo "NAABU_LINES=0" >> $GITHUB_ENV
             echo "--- No hosts to port scan ---"
@@ -164,7 +183,6 @@ jobs:
 
       - name: Gather URLs & prepare for Nuclei
         run: |
-          set -uo pipefail
           echo "--- Gathering URLs for vulnerability scanning ---"
           
           touch results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt results/candidate-urls.txt results/nuclei-urls.txt
@@ -177,13 +195,15 @@ jobs:
           
           grep -viE "\.(jpg|jpeg|png|gif|svg|css|js|woff|woff2|ico|bmp|mp4|mp3|pdf|zip|tar|gz)$" results/candidate-urls.txt > results/nuclei-urls.txt
           
-          if [ $(wc -l < results/nuclei-urls.txt) -gt ${{ env.MAX_URLS }} ]; then
+          NUCLEI_URLS_COUNT=$(wc -l < results/nuclei-urls.txt)
+          if [ "$NUCLEI_URLS_COUNT" -gt ${{ env.MAX_URLS }} ]; then
             shuf -n ${{ env.MAX_URLS }} results/nuclei-urls.txt > results/nuclei-urls-limited.txt
             mv results/nuclei-urls-limited.txt results/nuclei-urls.txt
+            NUCLEI_URLS_COUNT=${{ env.MAX_URLS }}
           fi
           
-          echo "NUCLEI_URLS=$(wc -l < results/nuclei-urls.txt)" >> $GITHUB_ENV
-          echo "--- Prepared $NUCLEI_URLS URLs for vulnerability scanning ---"
+          echo "NUCLEI_URLS=$NUCLEI_URLS_COUNT" >> $GITHUB_ENV
+          echo "--- Prepared $NUCLEI_URLS_COUNT URLs for vulnerability scanning ---"
 
       - name: Update Nuclei templates
         run: |
@@ -193,7 +213,6 @@ jobs:
 
       - name: Run Nuclei on URLs
         run: |
-          set -uo pipefail
           echo "--- Running Nuclei on URLs ---"
           touch results/nuclei-urls-results.txt
           if [ -s results/nuclei-urls.txt ]; then
@@ -204,7 +223,6 @@ jobs:
 
       - name: Run Nuclei on hosts
         run: |
-          set -uo pipefail
           echo "--- Running Nuclei on hosts ---"
           touch results/nuclei-hosts-results.txt
           if [ -s results/resolved-hosts.txt ]; then
@@ -215,14 +233,14 @@ jobs:
 
       - name: Process Nuclei results
         run: |
-          set -uo pipefail
           echo "--- Processing Nuclei results ---"
           touch results/nuclei-results.txt
           cat results/nuclei-urls-results.txt results/nuclei-hosts-results.txt | sed '/^$/d' | sort -u > results/nuclei-results.txt
-          echo "VULNS_FOUND=$(wc -l < results/nuclei-results.txt || echo 0)" >> $GITHUB_ENV
-          echo "--- Found $VULNS_FOUND vulnerabilities ---"
+          VULNS_COUNT=$(wc -l < results/nuclei-results.txt || echo 0)
+          echo "VULNS_FOUND=$VULNS_COUNT" >> $GITHUB_ENV
+          echo "--- Found $VULNS_COUNT vulnerabilities ---"
           
-          if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
+          if [ "$VULNS_COUNT" -gt 0 ]; then
             grep -oE '\[[^]]+\]' results/nuclei-results.txt | sort | uniq -c | sort -nr > results/vuln-summary.txt || echo "Failed to create vuln summary"
           else
             touch results/vuln-summary.txt
