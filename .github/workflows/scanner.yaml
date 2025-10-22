@@ -1,4 +1,4 @@
-name: Subdomain & Vulnerability Scanner (Production Ready)
+name: Subdomain & Vulnerability Scanner (Enhanced)
 
 on:
   workflow_dispatch:
@@ -56,8 +56,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq curl unzip git gcc make libpcap-dev
 
+          # Install Go-based tools
           echo "Installing Go tools..."
-          # If any of these fail, the whole job will fail, which is what we want.
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -83,7 +83,7 @@ jobs:
 
       - name: Notify Start
         run: |
-          MSG="🔍 **Scan Started**\n**Domain:** ${{ env.DOMAIN }}\n**Trigger:** ${{ github.event_name }}"
+          MSG="🔍 **Scan Started**\n**Domain:** ${{ env.DOMAIN }}\n**Trigger:** ${{ github.event_name }}\n**Tools:** subfinder, dnsx, httpx, naabu, waybackurls, gau, katana, nuclei"
           PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send start notification"
 
@@ -147,6 +147,18 @@ jobs:
           SUBDOMAINS_COUNT=$(wc -l < results/subdomains.txt)
           echo "SUBDOMAINS_FOUND=$SUBDOMAINS_COUNT" >> $GITHUB_ENV
           echo "--- Discovery complete. Final count: $SUBDOMAINS_COUNT subdomains ---"
+
+      - name: Notify Subfinder Results
+        run: |
+          # Read subdomains content
+          SUBDOMAINS_CONTENT=$(head -20 results/subdomains.txt)
+          
+          # Create message
+          MESSAGE="✅ **Subdomain Discovery Complete**\n**Domain:** ${{ env.DOMAIN }}\n**Subdomains Found:** ${{ env.SUBDOMAINS_FOUND }}\n\n\`\`\`\n$SUBDOMAINS_CONTENT\n\`\`\`"
+          
+          # Send to Discord
+          PAYLOAD=$(jq -n --arg content "$MESSAGE" '{content: $content}')
+          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send subdomain notification"
 
       - name: Resolve & probe alive hosts
         run: |
@@ -250,12 +262,22 @@ jobs:
       - name: Notify Nuclei Summary
         run: |
           if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
-            MSG="🚨 **Vulnerabilities Found!**\n**Domain:** ${{ env.DOMAIN }}\n**Count:** ${{ env.VULNS_FOUND }}"
+            MSG="🚨 **Vulnerabilities Found!**\n**Domain:** ${{ env.DOMAIN }}\n**Count:** ${{ env.VULNS_FOUND }}\n\nSending each vulnerability as a separate message..."
           else
-            MSG="✅ **Nuclei Complete**\n**Domain:** ${{ env.DOMAIN }}\nNo vulnerabilities found."
+            MSG="✅ **Nuclei Complete**\n**Domain:** ${{ env.DOMAIN }}\nNo critical/high/medium vulnerabilities found"
           fi
           PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
           curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send summary notification"
+
+      - name: Send vulnerability summary
+        if: env.VULNS_FOUND > 0
+        run: |
+          if [ -s results/vuln-summary.txt ]; then
+            SUMMARY=$(cat results/vuln-summary.txt | head -10 | awk '{print $2 " - " $1 " occurrences"}' | paste -sd '\n' -)
+            MSG="📊 **Vulnerability Summary for ${{ env.DOMAIN }}**\n\`\`\`\n$SUMMARY\n\`\`\`"
+            PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
+            curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send vuln summary"
+          fi
 
       - name: Send individual vulnerabilities (max 20)
         if: env.VULNS_FOUND > 0
@@ -270,7 +292,7 @@ jobs:
             
             MSG="🚨 **Vulnerability Found**\n**URL:** $URL\n**Type:** $VULN_TYPE\n**Severity:** $SEVERITY\n\`\`\`\n$vuln\n\`\`\`"
             PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
-            curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK}" || echo "Failed to send individual vuln"
+            curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send individual vuln"
             COUNT=$((COUNT+1))
             sleep 1
           done < results/nuclei-results.txt
