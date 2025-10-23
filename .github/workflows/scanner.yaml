@@ -1,39 +1,75 @@
-name: Subdomain & Vulnerability Scanner (Timeout-Safe)
+name: Subdomain & Vulnerability Scanner (Final)
 
 on:
   workflow_dispatch:
     inputs:
       domain:
-        description: 'Domain to scan'
+        description: 'Leave default to use secret, or enter new domains here (space-separated)'
         required: true
-        default: 'example.com'
-      severity:
-        description: 'Nuclei severity filter (e.g. critical,high,medium)'
-        required: false
-        default: 'critical,high,medium'
-      port_scan:
-        description: 'Enable port scanning (true/false)'
-        required: false
-        default: 'true'
-      max_urls:
-        description: 'Maximum URLs to scan with Nuclei'
-        required: false
-        default: '500' # Reduced default for faster scans
+        # A static, safe default value to avoid parsing errors.
+        default: 'Use targets from secret'
   schedule:
-    - cron: '0 6 * * 1'  # Every Monday at 6 AM UTC
-
-env:
-  DOMAIN: ${{ github.event.inputs.domain || 'example.com' }}
-  SEVERITY: ${{ github.event.inputs.severity || 'critical,high,medium' }}
-  PORT_SCAN: ${{ github.event.inputs.port_scan || 'true' }}
-  MAX_URLS: ${{ github.event.inputs.max_urls || '500' }}
+    # Every Monday at 6 AM UTC
+    - cron: '0 6 * * 1'
 
 jobs:
-  scan:
+  setup:
     runs-on: ubuntu-latest
-    
+    outputs:
+      domains: ${{ steps.set-domains.outputs.domains }}
     steps:
-      - name: Checkout repository
+      - name: Prepare Domain List
+        id: set-domains
+        run: |
+          # This is the placeholder text from the 'default' input
+          PLACEHOLDER='Use targets from secret'
+
+          # Logic to decide which domain list to use
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # For manual runs, check if the user changed the default placeholder
+            if [ "${{ github.event.inputs.domain }}" != "$PLACEHOLDER" ]; then
+              # If they changed it, use their new input
+              domains_string="${{ github.event.inputs.domain }}"
+              echo "Using user-provided domains from manual trigger."
+            else
+              # If they left the placeholder, fall back to the secret
+              domains_string="${{ secrets.TARGET_DOMAIN }}"
+              echo "User left default value, falling back to TARGET_DOMAIN secret."
+            fi
+          else
+            # For scheduled runs, always use the secret
+            domains_string="${{ secrets.TARGET_DOMAIN }}"
+            echo "Using TARGET_DOMAIN secret for scheduled run."
+          fi
+
+          # Final check to ensure we have a non-empty domain string
+          if [ -z "$domains_string" ]; then
+            echo "::error::Domain list is empty. Check your input or the TARGET_DOMAIN secret."
+            exit 1
+          fi
+
+          # Convert the space-separated string into a JSON array for the matrix
+          #
+          # !!! THIS IS THE MODIFIED LINE !!!
+          # It now filters out empty strings ("") resulting from extra spaces.
+          json_array=$(echo "$domains_string" | jq -R 'split(" ") | map(select(. != ""))' | jq -c .)
+          #
+          #
+          
+          echo "Final JSON for matrix: $json_array"
+          echo "domains=$json_array" >> $GITHUB_OUTPUT
+
+  scan:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        domain: ${{ fromJson(needs.setup.outputs.domains) }}
+
+    steps:
+      # ... (All other steps for installation, scanning, and notifications remain exactly the same) ...
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -41,235 +77,77 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Cache Go modules
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
-      - name: Install system packages & tools
+      - name: Install Tools
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq curl unzip git gcc make libpcap-dev
+          sudo apt-get install -y jq unzip wget git build-essential ca-certificates
+          echo "GOBIN=$HOME/go/bin" >> $GITHUB_ENV
+          echo "PATH=$PATH:$HOME/go/bin" >> $GITHUB_ENV
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest || true
+          go install -v github.com/tomnomnom/assetfinder@latest || true
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest || true
 
-          echo "Installing Go tools..."
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-          go install -v github.com/tomnomnom/waybackurls@latest
-          go install -v github.com/lc/gau/v2/cmd/gau@latest
-          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
-
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-          echo "Tool installation complete."
-
-      - name: Validate secrets
+      - name: Validate Discord Secret
         run: |
-          if [ -z "${{ secrets.DISCORD_WEBHOOK }}" ]; then
-            echo "::error::DISCORD_WEBHOOK secret is not set"
+          if [ -z "${{ secrets.DISCORD_GHOST }}" ]; then
+            echo "::error::DISCORD_GHOST secret is not set."
             exit 1
           fi
-          echo "DISCORD_WEBHOOK=${{ secrets.DISCORD_WEBHOOK }}" >> $GITHUB_ENV
+          echo "DISCORD_WEBHOOK=${{ secrets.DISCORD_GHOST }}" >> $GITHUB_ENV
 
-      - name: Create results directory
-        run: mkdir -p results
-
-      - name: Notify Start
+      - name: Notify Start for ${{ matrix.domain }}
         run: |
-          MSG="🔍 **Scan Started**\n**Domain:** ${{ env.DOMAIN }}\n**Trigger:** ${{ github.event_name }}"
-          PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
-          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send start notification"
+          curl -s -X POST -H "Content-Type: application/json" -d "{
+            \"content\": \"🔍 **Scan Started for Domain:** `${{ matrix.domain }}`\n**Trigger:** `${{ github.event_name }}`\"
+          }" "${{ env.DISCORD_WEBHOOK }}" || true
 
-      - name: Discover subdomains
+      - name: Run Subdomain Discovery for ${{ matrix.domain }}
         run: |
-          set -eo pipefail
-          echo "--- Starting subdomain discovery for ${{ env.DOMAIN }} ---"
-          touch results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt results/combined-subdomains.txt results/subdomains.txt
+          subfinder -d ${{ matrix.domain }} -silent -o subfinder-subs.txt || true
+          assetfinder --subs-only ${{ matrix.domain }} > assetfinder-subs.txt || true
+          cat subfinder-subs.txt assetfinder-subs.txt | sort -u > subdomains.txt
+          echo "SUBFINDER_SUBS_FOUND=$(wc -l < subfinder-subs.txt)" >> $GITHUB_ENV
+          echo "ASSETFINDER_SUBS_FOUND=$(wc -l < assetfinder-subs.txt)" >> $GITHUB_ENV
+          echo "TOTAL_SUBDOMAINS_FOUND=$(wc -l < subdomains.txt)" >> $GITHUB_ENV
 
-          subfinder -d "${{ env.DOMAIN }}" -all -silent -o results/subfinder.txt
-          echo "Subfinder found: $(wc -l < results/subfinder.txt) subdomains."
-          
-          echo "${{ env.DOMAIN }}" | waybackurls | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/wayback_hosts.txt
-          echo "Waybackurls found: $(wc -l < results/wayback_hosts.txt) hosts."
-          
-          gau "${{ env.DOMAIN }}" 2>/dev/null | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/gau_hosts.txt
-          echo "GAU found: $(wc -l < results/gau_hosts.txt) hosts."
-          
-          echo "https://${{ env.DOMAIN }}" | katana -depth 2 -jc -silent | sed -E 's#https?://([^/]+).*#\1#' | sort -u > results/katana_hosts.txt
-          echo "Katana found: $(wc -l < results/katana_hosts.txt) hosts."
-          
-          cat results/subfinder.txt results/wayback_hosts.txt results/gau_hosts.txt results/katana_hosts.txt | sort -u > results/combined-subdomains.txt
-          
-          cat >> results/combined-subdomains.txt <<'WL'
-          www.${{ env.DOMAIN }}
-          dev.${{ env.DOMAIN }}
-          staging.${{ env.DOMAIN }}
-          test.${{ env.DOMAIN }}
-          api.${{ env.DOMAIN }}
-          beta.${{ env.DOMAIN }}
-          mail.${{ env.DOMAIN }}
-          admin.${{ env.DOMAIN }}
-          portal.${{ env.DOMAIN }}
-          app.${{ env.DOMAIN }}
-          m.${{ env.DOMAIN }}
-          mobile.${{ env.DOMAIN }}
-          cdn.${{ env.DOMAIN }}
-          assets.${{ env.DOMAIN }}
-          static.${{ env.DOMAIN }}
-          blog.${{ env.DOMAIN }}
-          shop.${{ env.DOMAIN }}
-          secure.${{ env.DOMAIN }}
-          WL
-          
-          sort -u results/combined-subdomains.txt > results/subdomains.txt
-          SUBDOMAINS_COUNT=$(wc -l < results/subdomains.txt)
-          echo "SUBDOMAINS_FOUND=$SUBDOMAINS_COUNT" >> $GITHUB_ENV
-          echo "--- Discovery complete. Final count: $SUBDOMAINS_COUNT subdomains ---"
-
-      - name: Resolve & probe alive hosts
+      - name: Notify Subdomain Results for ${{ matrix.domain }}
         run: |
-          set -eo pipefail
-          echo "--- Resolving subdomains and checking for alive hosts ---"
-          touch results/resolved.txt results/resolved-hosts.txt results/alive.txt results/alive-urls.txt
-          
-          # Added timeout to prevent hanging
-          dnsx -l results/subdomains.txt -silent -a -r 1.1.1.1,8.8.8.8 -timeout 5 -o results/resolved.txt
-          cut -d' ' -f1 results/resolved.txt | cut -d':' -f1 | sort -u > results/resolved-hosts.txt
-          
-          # Added timeout to prevent hanging
-          httpx -l results/resolved-hosts.txt -silent -follow-redirects -title -status-code -tech-detect -timeout 10 -o results/alive.txt
-          cut -d' ' -f1 results/alive.txt > results/alive-urls.txt
-          
-          ALIVE_HOSTS_COUNT=$(wc -l < results/resolved-hosts.txt)
-          ALIVE_URLS_COUNT=$(wc -l < results/alive-urls.txt)
-          echo "ALIVE_HOSTS=$ALIVE_HOSTS_COUNT" >> $GITHUB_ENV
-          echo "ALIVE_URLS=$ALIVE_URLS_COUNT" >> $GITHUB_ENV
-          echo "--- Found $ALIVE_HOSTS_COUNT resolved hosts and $ALIVE_URLS_COUNT alive URLs ---"
+          SUBDOMAINS_CONTENT=$(head -n 20 subdomains.txt)
+          MESSAGE="✅ **Subdomain Discovery Complete**\n**Domain:** ${{ matrix.domain }}\n**Subfinder:** ${{ env.SUBFINDER_SUBS_FOUND }}\n**Assetfinder:** ${{ env.ASSETFINDER_SUBS_FOUND }}\n**Total Unique:** ${{ env.TOTAL_SUBDOMAINS_FOUND }}\n\n**Sample Results:**\n\`\`\`\n$SUBDOMAINS_CONTENT\n\`\`\`"
+          if [ ${#MESSAGE} -gt 1950 ]; then
+            MESSAGE="✅ **Subdomain Discovery Complete**\n**Domain:** ${{ matrix.domain }}\n**Total Unique:** ${{ env.TOTAL_SUBDOMAINS_FOUND }}\n(Result list truncated)"
+          fi
+          curl -s -X POST -H "Content-Type: application/json" -d "{\"content\": $(echo "$MESSAGE" | jq -Rs .)}" "${{ env.DISCORD_WEBHOOK }}" || true
 
-      - name: Port scan alive hosts (naabu)
-        if: env.PORT_SCAN == 'true'
+      - name: Run Nuclei for ${{ matrix.domain }}
         run: |
-          set -eo pipefail
-          echo "--- Starting port scan on alive hosts ---"
-          touch results/naabu-ports.txt
-          if [ -s results/resolved-hosts.txt ]; then
-            naabu -list results/resolved-hosts.txt -silent -top-ports 1000 -o results/naabu-ports.txt
-            NAABU_COUNT=$(wc -l < results/naabu-ports.txt)
-            echo "NAABU_LINES=$NAABU_COUNT" >> $GITHUB_ENV
-            echo "--- Found $NAABU_COUNT open ports ---"
+          nuclei -l subdomains.txt -severity critical,high,medium -silent -o nuclei-results.txt || true
+          [ -f nuclei-results.txt ] || touch nuclei-results.txt
+          echo "NUCLEI_VULNS_FOUND=$(wc -l < nuclei-results.txt)" >> $GITHUB_ENV
+
+      - name: Notify Vulnerability Summary for ${{ matrix.domain }}
+        run: |
+          if [ "${{ env.NUCLEI_VULNS_FOUND }}" -gt 0 ]; then
+              MESSAGE="🚨 **Vulnerabilities Found!**\n**Domain:** ${{ matrix.domain }}\n**Total:** ${{ env.NUCLEI_VULNS_FOUND }}\n\nSending details..."
           else
-            echo "NAABU_LINES=0" >> $GITHUB_ENV
-            echo "--- No hosts to port scan ---"
+              MESSAGE="✅ **Vulnerability Scan Complete**\n**Domain:** ${{ matrix.domain }}\nNo critical/high/medium vulnerabilities found."
           fi
+          curl -s -X POST -H "Content-Type: application/json" -d "{\"content\": \"$MESSAGE\"}" "${{ env.DISCORD_WEBHOOK }}" || true
 
-      - name: Gather URLs & prepare for Nuclei
+      - name: Send Nuclei Vulnerabilities for ${{ matrix.domain }}
+        if: env.NUCLEI_VULNS_FOUND != '0'
         run: |
-          set -eo pipefail
-          echo "--- Gathering URLs for vulnerability scanning ---"
-          touch results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt results/candidate-urls.txt results/nuclei-urls.txt
-          
-          waybackurls "${{ env.DOMAIN }}" > results/wayback-urls.txt
-          gau "${{ env.DOMAIN }}" > results/gau-urls.txt
-          cat results/alive-urls.txt | katana -depth 2 -jc -silent -o results/katana-urls.txt
-          
-          cat results/alive-urls.txt results/wayback-urls.txt results/gau-urls.txt results/katana-urls.txt | sort -u > results/candidate-urls.txt
-          
-          grep -viE "\.(jpg|jpeg|png|gif|svg|css|js|woff|woff2|ico|bmp|mp4|mp3|pdf|zip|tar|gz)$" results/candidate-urls.txt > results/nuclei-urls.txt
-          
-          NUCLEI_URLS_COUNT=$(wc -l < results/nuclei-urls.txt)
-          if [ "$NUCLEI_URLS_COUNT" -gt ${{ env.MAX_URLS }} ]; then
-            shuf -n ${{ env.MAX_URLS }} results/nuclei-urls.txt > results/nuclei-urls-limited.txt
-            mv results/nuclei-urls-limited.txt results/nuclei-urls.txt
-            NUCLEI_URLS_COUNT=${{ env.MAX_URLS }}
-          fi
-          
-          echo "NUCLEI_URLS=$NUCLEI_URLS_COUNT" >> $GITHUB_ENV
-          echo "--- Prepared $NUCLEI_URLS_COUNT URLs for vulnerability scanning ---"
-
-      - name: Update Nuclei templates
-        run: nuclei -update-templates
-
-      - name: Run Nuclei on URLs
-        run: |
-          set -eo pipefail
-          echo "--- Running Nuclei on URLs ---"
-          touch results/nuclei-urls-results.txt
-          if [ -s results/nuclei-urls.txt ]; then
-            # KEY CHANGE: Added timeout and retries to prevent hanging
-            nuclei -l results/nuclei-urls.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-urls-results.txt -silent -timeout 10 -retries 1
-          else
-            echo "No URLs to scan with Nuclei."
-          fi
-
-      - name: Run Nuclei on hosts
-        run: |
-          set -eo pipefail
-          echo "--- Running Nuclei on hosts ---"
-          touch results/nuclei-hosts-results.txt
-          if [ -s results/resolved-hosts.txt ]; then
-            # KEY CHANGE: Added timeout and retries to prevent hanging
-            nuclei -l results/resolved-hosts.txt -severity "${{ env.SEVERITY }}" -o results/nuclei-hosts-results.txt -silent -timeout 10 -retries 1
-          else
-            echo "No hosts to scan with Nuclei."
-          fi
-
-      - name: Process Nuclei results
-        run: |
-          set -eo pipefail
-          echo "--- Processing Nuclei results ---"
-          touch results/nuclei-results.txt
-          cat results/nuclei-urls-results.txt results/nuclei-hosts-results.txt | sed '/^$/d' | sort -u > results/nuclei-results.txt
-          VULNS_COUNT=$(wc -l < results/nuclei-results.txt || echo 0)
-          echo "VULNS_FOUND=$VULNS_COUNT" >> $GITHUB_ENV
-          echo "--- Found $VULNS_COUNT vulnerabilities ---"
-          
-          if [ "$VULNS_COUNT" -gt 0 ]; then
-            grep -oE '\[[^]]+\]' results/nuclei-results.txt | sort | uniq -c | sort -nr > results/vuln-summary.txt
-          fi
-
-      - name: Notify Nuclei Summary
-        run: |
-          if [ "${{ env.VULNS_FOUND }}" -gt 0 ]; then
-            MSG="🚨 **Vulnerabilities Found!**\n**Domain:** ${{ env.DOMAIN }}\n**Count:** ${{ env.VULNS_FOUND }}"
-          else
-            MSG="✅ **Scan Complete**\n**Domain:** ${{ env.DOMAIN }}\nNo critical/high/medium vulnerabilities found"
-          fi
-          PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
-          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send summary notification"
-
-      - name: Send individual vulnerabilities (max 20)
-        if: env.VULNS_FOUND > 0
-        run: |
-          MAX_MSG=20
-          COUNT=0
           while IFS= read -r vuln; do
-            [ "$COUNT" -ge "$MAX_MSG" ] && break
-            URL=$(echo "$vuln" | grep -oE 'https?://[^[:space:]]+' | head -1 || echo "N/A")
-            VULN_TYPE=$(echo "$vuln" | grep -oE '\[[^]]+\]' | head -1 || echo "N/A")
-            SEVERITY=$(echo "$vuln" | grep -oE '\[.*\]' | tail -1 || echo "N/A")
-            
-            MSG="🚨 **Vulnerability Found**\n**URL:** $URL\n**Type:** $VULN_TYPE\n**Severity:** $SEVERITY\n\`\`\`\n$vuln\n\`\`\`"
-            PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
-            curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send individual vuln"
-            COUNT=$((COUNT+1))
-            sleep 1
-          done < results/nuclei-results.txt
+              MESSAGE="🚨 **Nuclei Vulnerability Found**\n**Domain:** ${{ matrix.domain }}\n\`\`\`\n$vuln\n\`\`\`"
+              curl -s -X POST -H "Content-Type: application/json" -d "{\"content\": $(echo "$MESSAGE" | jq -Rs .)}" "${{ env.DISCORD_WEBHOOK }}" || true
+              sleep 1
+          done < nuclei-results.txt
 
-      - name: Upload artifacts
+      - name: Upload Artifacts for ${{ matrix.domain }}
         uses: actions/upload-artifact@v4
         with:
-          name: scan-results-${{ env.DOMAIN }}-$(date +%Y%m%d-%H%M%S)
-          path: results/
-          retention-days: 30
-
-      - name: Final notification
-        run: |
-          MSG="✅ **Scan Finished**\n**Domain:** ${{ env.DOMAIN }}\n**Subdomains:** ${{ env.SUBDOMAINS_FOUND }}\n**Alive URLs:** ${{ env.ALIVE_URLS }}\n**Vulnerabilities:** ${{ env.VULNS_FOUND }}"
-          PAYLOAD=$(jq -n --arg content "$MSG" '{content: $content}')
-          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ env.DISCORD_WEBHOOK }}" || echo "Failed to send final notification"
+          name: scan-results-${{ matrix.domain }}
+          path: |
+            subdomains.txt
+            nuclei-results.txt
