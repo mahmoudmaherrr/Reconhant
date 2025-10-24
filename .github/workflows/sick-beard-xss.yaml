@@ -1,8 +1,3 @@
-# 1. اعمل فولدر وسجّل محتوى الملف مباشرة (لو الملف مش موجود)
-mkdir nuclei-templates
-cd nuclei-templates
-
-cat > sick-beard-xss.yaml <<'YAML'
 id: sick-beard-xss
 
 info:
@@ -33,20 +28,3 @@ requests:
         words:
           - "text/html"
         part: header
-YAML
-
-# 2. اتهيأ git وادمج الملف
-git init
-git branch -M main
-git add sick-beard-xss.yaml
-git commit -m "Add Sick Beard XSS nuclei template"
-
-# 3. اعمل repo على GitHub بسرعة لو مثبت عندك gh (GitHub CLI)
-# (لو مش مثبت تقدر تعمل الريبو بالـ web ثم تعمل git remote add)
-gh repo create <your-username>/<repo-name> --public --source=. --remote=origin --push
-# مثال:
-# gh repo create mahmoud/nuclei-templates --public --source=. --remote=origin --push
-
-# لو مش عندك gh استخدم الويب لعمل repo، بعدين:
-# git remote add origin https://github.com/<your-username>/<repo-name>.git
-# git push -u origin main
