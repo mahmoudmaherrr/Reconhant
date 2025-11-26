@@ -1,0 +1,50 @@
+name: Nuclei Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target domain or URL'
+        required: true
+        type: string
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Install Nuclei
+        run: |
+          curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest \
+          | grep browser_download_url \
+          | grep linux_amd64.zip \
+          | cut -d '"' -f 4 \
+          | wget -qi -
+          
+          unzip nuclei_*_linux_amd64.zip
+          sudo mv nuclei /usr/local/bin/
+
+      - name: Update templates
+        run: nuclei -update-templates
+
+      - name: Run scan
+        run: |
+          echo "${{ github.event.inputs.target }}" > target.txt
+          nuclei -l target.txt -o nuclei-report.txt
+
+      - name: Send to Discord
+        run: |
+          CONTENT="$(cat nuclei-report.txt)"
+          curl -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"content\": \"**Nuclei Scan Report:**\nTarget: ${{ github.event.inputs.target }}\n\`\`\`${CONTENT}\`\`\`\"}" \
+            ${{ secrets.DISCORD_WEBHOOK }}
+
+      - name: Upload report
+        uses: actions/upload-artifact@v3
+        with:
+          name: nuclei-report
+          path: nuclei-report.txt
